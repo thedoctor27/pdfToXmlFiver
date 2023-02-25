@@ -1,0 +1,195 @@
+﻿@page "/file-upload-1"
+@using System
+@using System.IO
+@using FiverPdfExtractor.Data;
+@using Microsoft.AspNetCore.Hosting
+@using Microsoft.Extensions.Logging
+@inject ILogger<FileUpload1> Logger
+@inject IWebHostEnvironment Environment
+@using System.Text;
+@using iText.IO
+@using iText.Kernel.Pdf;
+@using iText.Kernel.Pdf.Canvas.Parser.Listener;
+@using iText.Kernel.Pdf.Canvas.Parser;
+<h3>Upload Files</h3>
+
+<p>
+    <label>
+        Max file size:
+        <input type="number" @bind="maxFileSize" />
+    </label>
+</p>
+
+<p>
+    <label>
+        Max allowed files:
+        <input type="number" @bind="maxAllowedFiles" />
+    </label>
+</p>
+
+<p>
+    <label>
+        Upload up to @maxAllowedFiles of up to @maxFileSize bytes:
+        <InputFile OnChange="@LoadFiles" multiple />
+    </label>
+</p>
+
+@if (isLoading)
+{
+    <p>Uploading...</p>
+}
+else
+{
+    <ul>
+        @foreach (var file in loadedFiles)
+        {
+            <li>
+                <ul>
+                    <li>Name: @file.Name</li>
+                    <li>Last modified: @file.LastModified.ToString()</li>
+                    <li>Size (bytes): @file.Size</li>
+                    <li>Content type: @file.ContentType</li>
+                </ul>
+            </li>
+        }
+    </ul>
+    <div class="container">
+
+        <textarea rows="200" style="width:100%">
+            @pdfdata
+        </textarea>
+
+        <table class="table">
+            <thead>
+                <tr>
+                    <td>Page</td>
+                    <td>Text</td>
+                    <td>Type</td>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var line in lines)
+                {
+                    <tr>
+                        <td>
+                            @line.page
+                        </td>
+                        <td>
+                            @line.Text
+                        </td>
+                        <td>
+                            @line.Type
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@code {
+    private List<IBrowserFile> loadedFiles = new();
+    private long maxFileSize = 1024 * 1024 * 15;
+    private int maxAllowedFiles = 3;
+    private bool isLoading;
+    private string pdfdata;
+    private List<DataLine> lines = new List<DataLine>();
+    private async Task LoadFiles(InputFileChangeEventArgs e)
+    {
+        isLoading = true;
+        loadedFiles.Clear();
+
+        foreach (var file in e.GetMultipleFiles(maxAllowedFiles))
+        {
+            try
+            {
+                loadedFiles.Add(file);
+
+                var trustedFileNameForFileStorage = file.Name;
+
+                var path = Path.Combine(Environment.ContentRootPath, "FilesStore", trustedFileNameForFileStorage);
+
+                await using FileStream fs = new(path, FileMode.Create);
+                await file.OpenReadStream(maxFileSize).CopyToAsync(fs);
+                fs.Close();
+                fs.Dispose();
+                pdfdata = await ReadPdfData(path);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("File: {Filename} Error: {Error}",
+                    file.Name, ex.Message);
+            }
+        }
+
+        isLoading = false;
+    }
+    private async Task<string> ReadPdfData(string path)
+    {
+        lines = new List<DataLine>();
+        StringBuilder pdftext = new StringBuilder();
+        PdfReader pdfReader = new PdfReader(path);
+        PdfDocument pdfDoc = new PdfDocument(pdfReader);
+        string Oldtype = "DEFAULT";
+        for (int page = 1; page <= 10 /*pdfDoc.GetNumberOfPages()*/; page++)
+        {
+            ITextExtractionStrategy strategy = new SimpleTextExtractionStrategy();
+            string txt = PdfTextExtractor.GetTextFromPage(pdfDoc.GetPage(page), strategy);
+            using (StringReader reader = new StringReader(txt))
+            {
+                string linetext;
+                while ((linetext = reader.ReadLine()) != null)
+                {
+                    DataLine line = new DataLine();
+                    line.page = page;
+                    line.Text = linetext;
+                    var words = line.Text.Split(' ');
+                    bool IsPerson = words.Length == 1 && line.Text == line.Text.ToUpper();
+                    string newType = "";
+                    if (IsPerson)
+                    {
+                        if (line.Text.Contains("CONTINUED"))
+                        {
+                            newType = "REMOVE";
+                            line.Type = "REMOVE";
+                        }
+                        else
+                        {
+                            newType = "PERSON";
+                            line.Type = "PERSON";
+                        }
+
+                    }
+                    else
+                    {
+                        if (Oldtype == "PERSON" || Oldtype == "COMMET")
+                        {
+                            newType = "COMMET";
+                            line.Type = "COMMET";
+                        }
+                        else
+                        {
+                            if (line.Text.Contains("CONTINUED"))
+                            {
+                                newType = "REMOVE";
+                                line.Type = "REMOVE";
+                            }
+                            else
+                            {
+                                newType = "DEFAULT";
+                                line.Type = "DEFAULT";
+                            }
+                        }
+                    }
+                    Oldtype = newType;
+                    lines.Add(line);
+                }
+            }
+
+            pdftext.Append(txt);
+        }
+        pdfDoc.Close();
+        pdfReader.Close();
+        return pdftext.ToString();
+    }
+}
